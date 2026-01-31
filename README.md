@@ -16,7 +16,7 @@ DeliveryFlow — мини-система оформления и доставк�
 - `audit` — запись истории событий.
 
 ### Инфраструктура
-- **NATS Core** — шина событий и RPC.
+- **NATS Core** (Cluster 3 nodes) — шина событий и RPC.
 - **JetStream** — сохранение истории доменных событий.
 - **PostgreSQL** — состояние заказов, платежей и пользователей.
 - **MongoDB** — хранение отзывов (документная модель).
@@ -44,7 +44,11 @@ flowchart LR
   end
 
   subgraph NATSZone[NATS Zone]
-    NATS[NATS Core]
+    direction TB
+    subgraph NATSCluster[Core Cluster]
+      direction LR
+      NATS[NATS Core 1] --- NATS2[NATS Core 2] --- NATS3[NATS Core 3]
+    end
     JS[JetStream]
   end
 
