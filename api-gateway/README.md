@@ -6,21 +6,17 @@ DeliveryFlow — мини-система оформления и доставк�
 
 ### Сервисы
 - `api-gateway` — HTTP API для клиентов (создать заказ, получить статус).
-- `identity` — аутентификация (JWT), управление пользователями.
 - `order` — создание заказа и публикация доменных событий.
 - `inventory` — резервирование товара.
 - `payment` — списание/отмена платежа.
 - `delivery` — назначение курьера и статусы доставки.
-- `review` — отзывы к товарам и рейтинги.
 - `notification` — отправка уведомлений (email/push).
 - `audit` — запись истории событий.
 
 ### Инфраструктура
 - **NATS Core** — шина событий и RPC.
 - **JetStream** — сохранение истории доменных событий.
-- **PostgreSQL** — состояние заказов, платежей и пользователей.
-- **MongoDB** — хранение отзывов (документная модель).
-- **Redis** — хранение сессий и временных токенов.
+- **PostgreSQL** (опционально) — состояние заказов и платежей.
 
 ### Зоны взаимодействия
 1. **Event Bus (NATS Core)**  
@@ -30,7 +26,7 @@ DeliveryFlow — мини-система оформления и доставк�
    Фоновые задачи уведомлений и обработки очередей.
 
 3. **Request/Reply (RPC)**  
-   Синхронные запросы статусов, проверки наличия и валидация токенов.
+   Синхронные запросы статусов или проверки наличия.
 
 4. **JetStream (History)**  
    История заказов и возможность реплея событий.
@@ -50,25 +46,15 @@ flowchart LR
 
   subgraph Services[Services]
     API[api-gateway]
-    ID[identity]
     O[order]
     I[inventory]
     P[payment]
     D[delivery]
-    R[review]
     N[notification]
     A[audit]
   end
 
-  C -->|HTTP auth/order/review| API
-  
-  %% Auth Flow
-  API -->|request rpc.auth.login| NATS
-  NATS -->|request| ID
-  ID -->|reply token| NATS
-  ID -->|publish events.user_registered| NATS
-  
-  %% Order Flow
+  C -->|HTTP create order| API
   API -->|request rpc.create_order| NATS
   NATS -->|request| O
   O -->|reply order_id| NATS
@@ -80,15 +66,9 @@ flowchart LR
   P -->|publish events.payment_captured| NATS
   NATS -->|subscribe events.payment_captured| D
   D -->|publish events.delivery_assigned| NATS
-  
-  %% Review Flow
-  API -->|request rpc.create_review| NATS
-  NATS -->|request| R
-  R -->|reply ok| NATS
-  R -->|publish events.review_created| NATS
 
-  %% Notifications & Audit
   NATS -->|queue group jobs.notify_user| N
+
   NATS -->|stream events.*| JS
   JS -->|deliver historical events| A
 ```
@@ -96,21 +76,16 @@ flowchart LR
 ## Потоки сообщений
 
 ### Pub/Sub (доменные события)
-- `identity` → `events.user_registered` → `notification` (Email "Welcome")
 - `order` → `events.order_created` → `inventory`
 - `inventory` → `events.inventory_reserved` → `payment`
 - `payment` → `events.payment_captured` → `delivery`
-- `review` → `events.review_created` → `notification` (Email "Thank you for review")
 
 ### Queue Group (фоновая обработка)
 - `events.*` → `jobs.notify_user` → `notification` (несколько воркеров)
 
 ### Request/Reply
-- `api-gateway` → `rpc.auth.login` → `identity` → токен
-- `api-gateway` → `rpc.auth.verify` → `identity` → ok/error
 - `api-gateway` → `rpc.create_order` → `order` → ответ
 - `api-gateway` → `rpc.get_order_status` → `order` → ответ
-- `api-gateway` → `rpc.create_review` → `review` → ответ
 
 ### JetStream
 - `events.*` → JetStream → `audit` → сохранение истории
@@ -118,19 +93,93 @@ flowchart LR
 ## NATS темы (subjects)
 
 ### Events
-- `events.user_registered`
 - `events.order_created`
 - `events.inventory_reserved`
 - `events.payment_captured`
 - `events.delivery_assigned`
-- `events.review_created`
 
 ### Jobs
 - `jobs.notify_user`
 
 ### RPC
-- `rpc.auth.login`
-- `rpc.auth.verify`
 - `rpc.create_order`
 - `rpc.get_order_status`
-- `rpc.create_review`
+
+## Api-gateway сервис
+
+`api-gateway` предоставляет HTTP API для клиентов и проксирует запросы в `order`
+через NATS Request/Reply. Сервис не хранит состояние, только валидирует входные
+данные и отдает ответы от доменных сервисов.
+
+### Требования
+- Go 1.25+
+- NATS Core (`nats://localhost:4222` по умолчанию)
+
+### Конфигурация (env)
+- `HTTP_ADDR` — адрес HTTP сервера (по умолчанию `:8080`)
+- `NATS_URL` — адрес NATS (по умолчанию `nats_rpc:4222`)
+
+### Эндпоинты
+
+#### `POST /api/v1/orders`
+Создать заказ.
+
+Request body:
+```json
+{
+  "user_id": "string",
+  "items": [
+    { "sku": "string", "qty": 1 }
+  ],
+  "address": "string",
+  "payment_method": "card"
+}
+```
+
+Response 201:
+```json
+{
+  "order_id": "string",
+  "status": "created"
+}
+```
+
+Ошибки:
+- 400 — некорректный JSON или невалидные поля
+- 504 — таймаут запроса к `order` через NATS
+- 502 — `order` вернул ошибку
+
+#### `GET /api/v1/orders/{id}`
+Получить статус заказа.
+
+Response 200:
+```json
+{
+  "order_id": "string",
+  "status": "created|reserved|paid|assigned|delivered|cancelled",
+  "updated_at": "2026-01-30T12:00:00Z"
+}
+```
+
+Ошибки:
+- 400 — некорректный `id`
+- 404 — заказ не найден
+- 504 — таймаут запроса к `order` через NATS
+- 502 — `order` вернул ошибку
+
+#### `GET /api/v1/health`
+Быстрый healthcheck (без внешних зависимостей). Ответ: `200 OK`.
+
+#### `GET /ready`
+Readiness-проверка: NATS подключен и доступен. Ответ: `200 OK` или `503`.
+
+### NATS взаимодействия
+- `POST /api/v1/orders` → `rpc.create_order` (request/reply)
+- `GET /api/v1/orders/{id}` → `rpc.get_order_status` (request/reply)
+
+### Запуск
+```bash
+export NATS_URL="nats_rpc:4222"
+export HTTP_ADDR=":8080"
+go run ./cmd
+```

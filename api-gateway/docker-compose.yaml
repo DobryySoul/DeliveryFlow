@@ -1,0 +1,27 @@
+services:
+  api-gateway:
+    container_name: api-gateway
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - nats_rpc
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - delivery_flow_network
+
+  nats_rpc:
+    container_name: nats_rpc
+    image: nats:2.12.4-linux
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    restart: unless-stopped
+    networks:
+      - delivery_flow_network
+
+networks:
+  delivery_flow_network:
+    driver: bridge

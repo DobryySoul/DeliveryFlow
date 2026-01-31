@@ -1,0 +1,14 @@
+http_config:
+  read_timeout: 10s
+  write_timeout: 10s
+  idle_timeout: 10s
+  http_addr: ":8080" # HTTP server address (порт)
+  concurrency: 4096
+  prefork: false
+
+nats:
+  url: "nats_rpc:4222" # NATS URL для RPC коммуникации (докер-compose) название_сервиса:порт
+  connect_timeout: 5s # Timeout для соединения с NATS
+  reconnect_timeout: 2s # Задержка для повторного соединения с NATS
+  retry_wait: 1s # Задержка для повторных попыток соединения с NATS
+
